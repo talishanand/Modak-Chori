@@ -1,0 +1,1157 @@
+/* ============================================================
+   Modak Chori! — A Vinayaka Chaturthi themed 3-lane runner
+   Ganesha, riding Mushak, races through the golden-hour hills
+   of Kailash on a perspective 3-lane road (Temple Run / Subway
+   Surfers style), gobbling up as many modaks as he can before
+   he stumbles. Pure canvas + vector drawing, no external
+   assets, no external network requests.
+   ============================================================ */
+
+// Diagnostic safety net: if anything throws anywhere (setup, a click
+// handler, a game-loop frame), show it on-screen instead of the page
+// just silently doing nothing. This registers before any other code runs.
+window.addEventListener("error", function (e) {
+  try {
+    var b = document.getElementById("errorBanner");
+    if (!b) return;
+    var detail = (e.error && (e.error.stack || e.error.message)) || e.message || "Unknown error";
+    b.textContent =
+      "The game hit an error and stopped:\n\n" + detail +
+      "\n\nA few things to check:\n" +
+      "• Make sure the game folder was fully extracted/unzipped (not opened from inside the .zip).\n" +
+      "• Try a different browser (Chrome, Firefox, Edge, Safari all work).\n" +
+      "• If you're opening index.html directly as a file, try serving it from a local/simple web server instead.";
+    b.classList.remove("hidden");
+  } catch (ignored) { /* never let the error handler itself break anything */ }
+});
+
+(function () {
+  "use strict";
+
+  // ---------- DOM ----------
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const hud = document.getElementById("hud");
+  const modakCountEl = document.getElementById("modakCount");
+  const distanceCountEl = document.getElementById("distanceCount");
+  const livesBox = document.getElementById("livesBox");
+  const muteBtn = document.getElementById("muteBtn");
+  const swipeHint = document.getElementById("swipeHint");
+
+  const startScreen = document.getElementById("startScreen");
+  const startBtn = document.getElementById("startBtn");
+  const highScoreStartEl = document.getElementById("highScoreStart");
+
+  const gameOverScreen = document.getElementById("gameOverScreen");
+  const endTitleEl = document.getElementById("endTitle");
+  const endStoryEl = document.getElementById("endStory");
+  const finalModaksEl = document.getElementById("finalModaks");
+  const finalDistanceEl = document.getElementById("finalDistance");
+  const finalScoreEl = document.getElementById("finalScore");
+  const finalHighEl = document.getElementById("finalHigh");
+  const retryBtn = document.getElementById("retryBtn");
+
+  // ---------- persistent high score ----------
+  const HS_KEY = "modakChoriHighScore";
+  function loadHighScore() {
+    try { return parseInt(localStorage.getItem(HS_KEY) || "0", 10) || 0; }
+    catch (e) { return 0; }
+  }
+  function saveHighScore(v) {
+    try { localStorage.setItem(HS_KEY, String(v)); } catch (e) { /* ignore */ }
+  }
+  let highScore = loadHighScore();
+  highScoreStartEl.textContent = highScore;
+
+  // ---------- canvas sizing ----------
+  let W = 0, H = 0, groundY = 0, horizonY = 0;
+  function resize() {
+    W = canvas.clientWidth;
+    H = canvas.clientHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    groundY = H * 0.84;
+    horizonY = H * 0.40;
+  }
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", resize);
+  resize();
+
+  // ---------- audio (procedural, no external files) ----------
+  let audioCtx = null;
+  let muted = false;
+  function ensureAudio() {
+    if (!audioCtx) {
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { audioCtx = null; }
+    }
+  }
+  function beep(freq, dur, type, peak) {
+    if (muted || !audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || "sine";
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.linearRampToValueAtTime(peak || 0.15, t0 + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.02);
+  }
+  const sfx = {
+    jump: () => beep(520, 0.16, "triangle", 0.12),
+    lane: () => beep(700, 0.08, "square", 0.06),
+    collect: () => beep(880, 0.14, "sine", 0.14),
+    hit: () => beep(140, 0.28, "sawtooth", 0.16),
+    over: () => beep(90, 0.5, "sawtooth", 0.18),
+  };
+  muteBtn.addEventListener("click", () => {
+    muted = !muted;
+    muteBtn.textContent = muted ? "🔇" : "🔊";
+  });
+
+  // ---------- palette (golden-hour Kailash) ----------
+  const COL = {
+    skyTop: "#2b1750",
+    skyMid: "#7a3a63",
+    skyBand: "#ff8a4c",
+    sun: "#ffe08a",
+    mountainFar: "#4a2f68",
+    mountainMid: "#6b3f6f",
+    mountainNear: "#3a2350",
+    snowCapLit: "#ffd8a8",
+    forestFar: "#3c5a3f",
+    forestNear: "#25431f",
+    grass: "#5c8a3e",
+    grassDark: "#3c6428",
+    dirt: "#8a7256",
+    dirtDark: "#6b5640",
+    road: "#b9a586",
+    roadEdge: "#8a7256",
+    laneLine: "rgba(255,255,255,0.75)",
+    ganeshaSkin: "#eda679",
+    ganeshaSkinDark: "#cf8058",
+    ganeshaSkinLight: "#facaa0",
+    cloth: "#d1567a",
+    clothDark: "#9c3457",
+    crown: "#ffd24d",
+    crownDark: "#e0a020",
+    mouseBody: "#8a8a92",
+    mouseBodyLight: "#adacb4",
+    mouseDark: "#5e5d66",
+    nandi: "#f7f4ee",
+    nandiShade: "#d8d2c2",
+    nandiGold: "#e0a020",
+    rock: "#7b8a9a",
+    rockDark: "#5a6675",
+    boulder: "#8a6a52",
+    boulderDark: "#5f4632",
+    ice: "#d7f0fb",
+    modakBody: "#e0a840",
+    modakLeaf: "#4f7a3d",
+    flag1: "#c1443c",
+    flag2: "#f4a73a",
+    flag3: "#3d6ea5",
+    shivaSkin: "#5b8fc9",
+    shivaSkinDark: "#37628f",
+    shivaSkinLight: "#8ab4e0",
+    jata: "#3b2a1e",
+    jataLight: "#5a4230",
+    crescent: "#f4f1e8",
+    tigerSkin: "#e0982f",
+    tigerSpot: "#3b2a1e",
+    trishul: "#d8dde2",
+    trishulDark: "#8b939c",
+    rudraksha: "#5a3d28",
+    petalPink: "#f0a7c4",
+    petalOrange: "#f4b860",
+    lotusPink: "#f2a0c0",
+    lotusCenter: "#f4d060",
+  };
+
+  const FLOWER_COLORS = ["#e0507a", "#f4a73a", "#f2e94e", "#7fb3e0", "#f2f2f2", COL.petalPink];
+
+  // ---------- state ----------
+  const STATE = { START: "start", PLAYING: "playing", OVER: "over" };
+  let state = STATE.START;
+
+  const BASE_SPEED = 480;   // z-units/sec at start
+  const MAX_SPEED = 980;    // z-units/sec cap
+  const FAR_Z = 900;        // spawn distance
+  const FOCAL = 260;        // perspective strength
+  const GRAVITY = 2200;
+
+  let speed = BASE_SPEED;
+  let distanceM = 0;
+  let modaks = 0;
+  let lives = 3;
+  let score = 0;
+  let elapsed = 0;
+
+  let obstacles = [];
+  let collectibles = [];
+  let dust = [];
+  let sparks = [];
+  let snowflakes = [];
+  let petals = [];
+  let flags = [];
+  let groundTexture = null;
+
+  let obstacleTimer = 0;
+  let collectibleTimer = 0;
+  let flagTimer = 0;
+
+  let shakeTime = 0, shakeMag = 0;
+  let hitFlash = 0;
+
+  const LANE_OFFSET_NEAR_FACTOR = 0.30;   // * H, spacing between lanes at player row
+  const LANE_OFFSET_FAR_FACTOR = 0.018;   // * H, spacing near the horizon (near-converged)
+
+  const player = {
+    lane: 1,          // 0=left,1=center,2=right (integer, settled)
+    visualLane: 1,    // smoothed float for sliding animation
+    airY: 0,
+    vy: 0,
+    onGround: true,
+    ducking: false,
+    invuln: 0,
+    runTimer: 0,
+    runPhase: 0,
+    lean: 0,
+  };
+
+  function scaleUnit() { return H * 0.115; }
+
+  function project(z) {
+    // returns t in (0,1]; 1 = at player's plane (z=0), smaller = farther away
+    return FOCAL / (FOCAL + Math.max(0, z));
+  }
+  function laneOffsetPx(t) {
+    const near = H * LANE_OFFSET_NEAR_FACTOR;
+    const far = H * LANE_OFFSET_FAR_FACTOR;
+    return far + (near - far) * t;
+  }
+  function screenYAt(t) { return horizonY + (groundY - horizonY) * t; }
+  function scaleAt(t) { const minS = 0.12; return minS + (1 - minS) * t; }
+  function laneScreenX(laneFloat, t) {
+    return W / 2 + (laneFloat - 1) * laneOffsetPx(t);
+  }
+
+  // seed ambient snow
+  function seedSnow() {
+    snowflakes = [];
+    const count = Math.round((W * H) / 46000) + 7;
+    for (let i = 0; i < count; i++) {
+      snowflakes.push({
+        x: Math.random() * W, y: Math.random() * H,
+        r: 1 + Math.random() * 2.2,
+        vy: 14 + Math.random() * 30,
+        vx: -8 - Math.random() * 14,
+        sway: Math.random() * Math.PI * 2,
+      });
+    }
+  }
+  // Note: ambient falling snow is intentionally not seeded — the trail
+  // itself is a grassy/rocky hillside path; only the distant peaks stay
+  // snow-capped, per the reference art.
+
+  // seed drifting festival petals (marigold/lotus offerings on the wind)
+  function seedPetals() {
+    petals = [];
+    const count = Math.round((W * H) / 60000) + 6;
+    for (let i = 0; i < count; i++) {
+      petals.push({
+        x: Math.random() * W, y: Math.random() * H,
+        r: 3 + Math.random() * 3.5,
+        vy: 20 + Math.random() * 22,
+        vx: -14 - Math.random() * 18,
+        sway: Math.random() * Math.PI * 2,
+        rot: Math.random() * Math.PI * 2,
+        vr: (Math.random() - 0.5) * 2,
+        color: Math.random() < 0.55 ? COL.petalPink : COL.petalOrange,
+      });
+    }
+  }
+  seedPetals();
+  seedGroundTexture();
+
+  // ---------- reset / start / end ----------
+  function resetRun() {
+    speed = BASE_SPEED;
+    distanceM = 0;
+    modaks = 0;
+    lives = 3;
+    score = 0;
+    elapsed = 0;
+    obstacles = [];
+    collectibles = [];
+    dust = [];
+    sparks = [];
+    obstacleTimer = 0.7;
+    collectibleTimer = 1.0;
+    flagTimer = 0.5;
+    player.lane = 1;
+    player.visualLane = 1;
+    player.airY = 0;
+    player.vy = 0;
+    player.onGround = true;
+    player.ducking = false;
+    player.invuln = 0;
+    player.lean = 0;
+    shakeTime = 0; hitFlash = 0;
+    updateLivesUI();
+    modakCountEl.textContent = "0";
+    distanceCountEl.textContent = "0";
+  }
+
+  function startGame() {
+    ensureAudio();
+    resetRun();
+    state = STATE.PLAYING;
+    startScreen.classList.add("hidden");
+    gameOverScreen.classList.add("hidden");
+    hud.classList.remove("hidden");
+    swipeHint.classList.add("show");
+    swipeHint.classList.remove("fade");
+    clearTimeout(startGame._hintTimer);
+    startGame._hintTimer = setTimeout(() => swipeHint.classList.add("fade"), 3200);
+  }
+
+  function endGame() {
+    state = STATE.OVER;
+    sfx.over();
+    score = Math.floor(modaks * 15 + distanceM * 1.5);
+    if (score > highScore) { highScore = score; saveHighScore(highScore); }
+    finalModaksEl.textContent = modaks;
+    finalDistanceEl.textContent = Math.floor(distanceM) + " m";
+    finalScoreEl.textContent = score;
+    finalHighEl.textContent = highScore;
+    hud.classList.add("hidden");
+    swipeHint.classList.remove("show");
+    gameOverScreen.classList.remove("hidden");
+  }
+
+  function updateLivesUI() {
+    const spansEls = livesBox.querySelectorAll(".life");
+    spansEls.forEach((s, i) => s.classList.toggle("lost", i >= lives));
+  }
+
+  // ---------- input ----------
+  function jump() {
+    if (state !== STATE.PLAYING) return;
+    if (player.onGround && !player.ducking) {
+      player.vy = H * 1.35;
+      player.onGround = false;
+      sfx.jump();
+    }
+  }
+  function setDuck(v) {
+    if (state !== STATE.PLAYING) return;
+    player.ducking = v && player.onGround;
+  }
+  function changeLane(dir) {
+    if (state !== STATE.PLAYING) return;
+    const nl = Math.max(0, Math.min(2, player.lane + dir));
+    if (nl !== player.lane) {
+      player.lane = nl;
+      sfx.lane();
+      if (swipeHint.classList.contains("show")) swipeHint.classList.add("fade");
+    }
+  }
+
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); jump(); }
+    else if (e.code === "ArrowDown") { e.preventDefault(); setDuck(true); }
+    else if (e.code === "ArrowLeft") { e.preventDefault(); changeLane(-1); }
+    else if (e.code === "ArrowRight") { e.preventDefault(); changeLane(1); }
+  });
+  window.addEventListener("keyup", (e) => {
+    if (e.code === "ArrowDown") setDuck(false);
+  });
+
+  // swipe gesture handling
+  let touchStart = null;
+  const SWIPE_THRESH = 32;
+  canvas.addEventListener("pointerdown", (e) => {
+    touchStart = { x: e.clientX, y: e.clientY, t: performance.now() };
+    if (state === STATE.START) startGame();
+    else if (state === STATE.OVER) startGame();
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    if (!touchStart || state !== STATE.PLAYING) { touchStart = null; return; }
+    const dx = e.clientX - touchStart.x;
+    const dy = e.clientY - touchStart.y;
+    const adx = Math.abs(dx), ady = Math.abs(dy);
+    const dt = performance.now() - touchStart.t;
+    if (adx < 12 && ady < 12) {
+      jump(); // tap = jump
+    } else if (adx > ady && adx > SWIPE_THRESH) {
+      changeLane(dx > 0 ? 1 : -1);
+    } else if (ady > adx && ady > SWIPE_THRESH) {
+      if (dy < 0) jump();
+      else { setDuck(true); setTimeout(() => setDuck(false), 350); }
+    }
+    touchStart = null;
+  });
+
+  startBtn.addEventListener("click", startGame);
+  retryBtn.addEventListener("click", startGame);
+
+  // ---------- spawning ----------
+  function randLane() { return Math.floor(Math.random() * 3); }
+
+  function spawnObstacle() {
+    const r = Math.random();
+    const lane = randLane();
+    let type = "rock";
+    if (r < 0.4) type = "rock";
+    else if (r < 0.72) type = "icicle";
+    else type = "boulder";
+    obstacles.push({ type, lane, z: FAR_Z });
+  }
+  function spawnCollectible() {
+    const lane = randLane();
+    collectibles.push({ lane, z: FAR_Z });
+  }
+  function spawnFlagCluster() {
+    const r = Math.random();
+    flags.push({
+      z: FAR_Z + Math.random() * 200,
+      side: Math.random() < 0.5 ? -1 : 1,
+      kind: r < 0.4 ? "flag" : r < 0.62 ? "lotus" : "tree",
+    });
+  }
+  function spawnDust() {
+    const t = 1;
+    const x = laneScreenX(player.visualLane, t) + (Math.random() - 0.5) * scaleUnit() * 0.4;
+    dust.push({
+      x, y: groundY + 4, vx: (-40 - Math.random() * 40), vy: -20 - Math.random() * 30,
+      life: 0.4 + Math.random() * 0.2, age: 0, r: 2 + Math.random() * 2.5,
+    });
+  }
+  function spawnSparks(x, y) {
+    for (let i = 0; i < 8; i++) {
+      const ang = (Math.PI * 2 * i) / 8 + Math.random() * 0.4;
+      const spd = 60 + Math.random() * 90;
+      sparks.push({
+        x, y, vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd - 40,
+        life: 0.45 + Math.random() * 0.2, age: 0,
+      });
+    }
+  }
+
+  // ---------- update ----------
+  function update(dt) {
+    for (const f of snowflakes) {
+      f.sway += dt * 1.4;
+      f.x += (f.vx + Math.sin(f.sway) * 8) * dt;
+      f.y += f.vy * dt;
+      if (f.y > H) { f.y = -5; f.x = Math.random() * W; }
+      if (f.x < -10) f.x = W + 10;
+    }
+    for (const p of petals) {
+      p.sway += dt * 1.1;
+      p.rot += p.vr * dt;
+      p.x += (p.vx + Math.sin(p.sway) * 10) * dt;
+      p.y += p.vy * dt;
+      if (p.y > H) { p.y = -8; p.x = Math.random() * W; }
+      if (p.x < -12) p.x = W + 12;
+    }
+
+    // particles keep animating even off-play, but only spawn during play
+    for (let i = dust.length - 1; i >= 0; i--) {
+      const d = dust[i]; d.age += dt; d.x += d.vx * dt; d.y += d.vy * dt; d.vy += 60 * dt;
+      if (d.age >= d.life) dust.splice(i, 1);
+    }
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const s = sparks[i]; s.age += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 140 * dt;
+      if (s.age >= s.life) sparks.splice(i, 1);
+    }
+    if (shakeTime > 0) shakeTime = Math.max(0, shakeTime - dt);
+    if (hitFlash > 0) hitFlash = Math.max(0, hitFlash - dt * 2.2);
+
+    if (state !== STATE.PLAYING) return;
+
+    elapsed += dt;
+    speed = Math.min(MAX_SPEED, BASE_SPEED + elapsed * 14);
+    distanceM += (speed * dt) / 22;
+    distanceCountEl.textContent = Math.floor(distanceM);
+
+    // lane slide + lean
+    const laneDiff = player.lane - player.visualLane;
+    player.visualLane += laneDiff * Math.min(1, dt * 11);
+    player.lean = laneDiff;
+
+    // jump physics
+    if (!player.onGround) {
+      player.vy -= GRAVITY * dt * (H / 540);
+      player.airY += player.vy * dt;
+      if (player.airY <= 0) { player.airY = 0; player.vy = 0; player.onGround = true; }
+    }
+    player.runTimer += dt;
+    if (player.runTimer > 0.13) { player.runTimer = 0; player.runPhase = 1 - player.runPhase; }
+    if (player.invuln > 0) player.invuln -= dt;
+
+    if (player.onGround && Math.random() < dt * 14) spawnDust();
+
+    // spawn timers
+    obstacleTimer -= dt;
+    if (obstacleTimer <= 0) {
+      spawnObstacle();
+      const gapBase = Math.max(0.55, 1.35 - elapsed / 55);
+      obstacleTimer = gapBase + Math.random() * 0.45;
+    }
+    collectibleTimer -= dt;
+    if (collectibleTimer <= 0) { spawnCollectible(); collectibleTimer = 0.7 + Math.random() * 0.9; }
+    flagTimer -= dt;
+    if (flagTimer <= 0) { spawnFlagCluster(); flagTimer = 2.4 + Math.random() * 2.2; }
+
+    // move obstacles along z, collide at crossing
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      const o = obstacles[i];
+      const prevZ = o.z;
+      o.z -= speed * dt;
+      if (prevZ > 0 && o.z <= 0) {
+        if (player.invuln <= 0 && o.lane === player.lane) {
+          let hit = true;
+          if (o.type === "rock" && player.airY > scaleUnit() * 0.32) hit = false;
+          if (o.type === "icicle" && player.ducking) hit = false;
+          if (hit) {
+            lives -= 1;
+            player.invuln = 1.2;
+            updateLivesUI();
+            sfx.hit();
+            shakeTime = 0.28; shakeMag = scaleUnit() * 0.16; hitFlash = 1;
+            if (lives <= 0) { obstacles.splice(i, 1); endGame(); return; }
+          }
+        }
+      }
+      if (o.z < -40) obstacles.splice(i, 1);
+    }
+
+    // move collectibles along z, collect at crossing
+    for (let i = collectibles.length - 1; i >= 0; i--) {
+      const c = collectibles[i];
+      const prevZ = c.z;
+      c.z -= speed * dt;
+      if (prevZ > 0 && c.z <= 0 && c.lane === player.lane) {
+        modaks += 1;
+        modakCountEl.textContent = modaks;
+        sfx.collect();
+        const t = 1;
+        spawnSparks(laneScreenX(player.visualLane, t), groundY - scaleUnit() * 1.1 - player.airY);
+        collectibles.splice(i, 1);
+        continue;
+      }
+      if (c.z < -40) collectibles.splice(i, 1);
+    }
+
+    for (let i = flags.length - 1; i >= 0; i--) {
+      flags[i].z -= speed * 0.5 * dt;
+      if (flags[i].z < -60) flags.splice(i, 1);
+    }
+  }
+
+  // ---------- drawing: background ----------
+  function drawBackground(t) {
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, horizonY + 20);
+    skyGrad.addColorStop(0, COL.skyTop);
+    skyGrad.addColorStop(0.55, COL.skyMid);
+    skyGrad.addColorStop(1, COL.skyBand);
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, horizonY + 20);
+
+    // sun glow near horizon
+    const sunY = horizonY * 0.62;
+    const sunGrad = ctx.createRadialGradient(W / 2, sunY, 2, W / 2, sunY, H * 0.42);
+    sunGrad.addColorStop(0, "rgba(255,224,138,0.85)");
+    sunGrad.addColorStop(0.4, "rgba(255,170,90,0.28)");
+    sunGrad.addColorStop(1, "rgba(255,170,90,0)");
+    ctx.fillStyle = sunGrad;
+    ctx.beginPath(); ctx.arc(W / 2, sunY, H * 0.42, 0, Math.PI * 2); ctx.fill();
+
+    // distant snow-capped peaks (Kailash itself stays snowy far above the trail)
+    drawMountainRow(t * 0.015, COL.mountainFar, H * 0.30, H * 0.20, 5, 0.4);
+    drawMountainRow(t * 0.035, COL.mountainMid, H * 0.22, H * 0.26, 4, 0.6);
+
+    // forested foothill slope beneath the peaks, above the trail
+    drawForestBand(t);
+
+    for (const f of flags) drawFlagCluster(f);
+
+    // ground plane (beyond road edges) — grassy, rocky trail-side terrain
+    const gGrad = ctx.createLinearGradient(0, horizonY, 0, H);
+    gGrad.addColorStop(0, COL.grassDark);
+    gGrad.addColorStop(0.5, COL.grass);
+    gGrad.addColorStop(1, COL.grassDark);
+    ctx.fillStyle = gGrad;
+    ctx.fillRect(0, horizonY, W, H - horizonY);
+    drawGroundTexture();
+
+    drawRoad(t);
+  }
+
+  // seeded ground texture (grass tufts, rocks, wildflowers) so the trailside
+  // reads as a real hillside rather than flat snow
+  function seedGroundTexture() {
+    groundTexture = [];
+    const rows = 9;
+    for (let r = 0; r < rows; r++) {
+      const rowT = r / (rows - 1); // 0 near horizon, 1 near bottom
+      const y = horizonY + (H - horizonY) * (rowT * rowT);
+      const count = 8 + Math.round(rowT * 14);
+      for (let i = 0; i < count; i++) {
+        const kind = Math.random();
+        groundTexture.push({
+          x: Math.random() * W,
+          y: y + (Math.random() - 0.5) * (H * 0.02),
+          s: 0.4 + rowT * 1.3,
+          type: kind < 0.55 ? "tuft" : kind < 0.8 ? "rock" : "flower",
+          color: kind < 0.8 ? null : FLOWER_COLORS[Math.floor(Math.random() * FLOWER_COLORS.length)],
+        });
+      }
+    }
+  }
+  function drawGroundTexture() {
+    if (!groundTexture) return;
+    for (const g of groundTexture) {
+      if (g.y < horizonY || g.y > H) continue;
+      if (g.type === "tuft") {
+        ctx.strokeStyle = COL.grassDark;
+        ctx.lineWidth = Math.max(1, g.s);
+        ctx.beginPath();
+        ctx.moveTo(g.x, g.y);
+        ctx.lineTo(g.x - 3 * g.s, g.y - 6 * g.s);
+        ctx.moveTo(g.x, g.y);
+        ctx.lineTo(g.x + 3 * g.s, g.y - 6 * g.s);
+        ctx.moveTo(g.x, g.y);
+        ctx.lineTo(g.x, g.y - 7 * g.s);
+        ctx.stroke();
+      } else if (g.type === "rock") {
+        ctx.fillStyle = COL.dirtDark;
+        ctx.beginPath();
+        ctx.ellipse(g.x, g.y, 4 * g.s, 2.4 * g.s, 0, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.fillStyle = g.color;
+        for (let k = 0; k < 4; k++) {
+          const ang = (Math.PI * 2 * k) / 4;
+          ctx.beginPath();
+          ctx.arc(g.x + Math.cos(ang) * 2.6 * g.s, g.y + Math.sin(ang) * 2.6 * g.s, 1.7 * g.s, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.fillStyle = COL.lotusCenter;
+        ctx.beginPath(); ctx.arc(g.x, g.y, 1.3 * g.s, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+
+  function drawForestBand(t) {
+    const topY = horizonY + 2;
+    const botY = horizonY + (groundY - horizonY) * 0.16;
+    const grad = ctx.createLinearGradient(0, topY, 0, botY);
+    grad.addColorStop(0, COL.forestFar);
+    grad.addColorStop(1, COL.forestNear);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, topY, W, botY - topY);
+    // simple pine silhouettes along the band for texture
+    ctx.fillStyle = COL.forestNear;
+    const step = 26;
+    const off = (t * 40) % step;
+    for (let x = -step; x < W + step; x += step) {
+      const px = x - off;
+      const ph = botY - topY;
+      ctx.beginPath();
+      ctx.moveTo(px, botY);
+      ctx.lineTo(px + step * 0.5, botY - ph * 1.4);
+      ctx.lineTo(px + step, botY);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function drawMountainRow(offset, color, peakH, baseH, count, capLit) {
+    const step = W / count + 70;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(-100, horizonY + 4);
+    const pts = [];
+    for (let i = -1; i <= count + 1; i++) {
+      const cx = i * step - (offset % step);
+      const peak = horizonY - peakH * (0.6 + 0.4 * Math.abs(Math.sin(i * 1.7)));
+      ctx.lineTo(cx - step * 0.5, horizonY - baseH * 0.15);
+      ctx.lineTo(cx, peak);
+      pts.push({ x: cx, y: peak });
+      ctx.lineTo(cx + step * 0.5, horizonY - baseH * 0.15);
+    }
+    ctx.lineTo(W + 100, horizonY + 4);
+    ctx.closePath();
+    ctx.fill();
+    // lit snow caps
+    ctx.fillStyle = `rgba(255,216,168,${0.35 * capLit})`;
+    for (const p of pts) {
+      ctx.beginPath();
+      ctx.moveTo(p.x - 14, p.y + 16);
+      ctx.lineTo(p.x, p.y);
+      ctx.lineTo(p.x + 14, p.y + 16);
+      ctx.lineTo(p.x + 5, p.y + 12);
+      ctx.lineTo(p.x, p.y + 20);
+      ctx.lineTo(p.x - 5, p.y + 12);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function drawRoad(t) {
+    const nearHalf = W * 0.46;
+    const farHalf = W * 0.05;
+    ctx.save();
+    const roadGrad = ctx.createLinearGradient(0, horizonY, 0, groundY);
+    roadGrad.addColorStop(0, "#d8c7a8");
+    roadGrad.addColorStop(1, COL.road);
+    ctx.fillStyle = roadGrad;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - farHalf, horizonY);
+    ctx.lineTo(W / 2 + farHalf, horizonY);
+    ctx.lineTo(W / 2 + nearHalf, groundY + 4);
+    ctx.lineTo(W / 2 - nearHalf, groundY + 4);
+    ctx.closePath();
+    ctx.fill();
+
+    // road edge highlight
+    ctx.strokeStyle = COL.roadEdge;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - farHalf, horizonY); ctx.lineTo(W / 2 - nearHalf, groundY + 4);
+    ctx.moveTo(W / 2 + farHalf, horizonY); ctx.lineTo(W / 2 + nearHalf, groundY + 4);
+    ctx.stroke();
+
+    // scrolling lane divider lines (2 dividers -> 3 lanes)
+    ctx.strokeStyle = COL.laneLine;
+    const scrollOff = (t * 1.6) % 1;
+    for (const laneF of [1 / 3, 2 / 3]) {
+      const farX = W / 2 - farHalf + laneF * (farHalf * 2);
+      const nearX = W / 2 - nearHalf + laneF * (nearHalf * 2);
+      const dashCount = 7;
+      for (let i = 0; i < dashCount; i++) {
+        const p0 = (i + scrollOff) / dashCount;
+        const p1 = Math.min(1, p0 + 0.5 / dashCount);
+        if (p1 <= p0) continue;
+        const y0 = horizonY + (groundY - horizonY) * p0;
+        const y1 = horizonY + (groundY - horizonY) * p1;
+        const x0 = farX + (nearX - farX) * p0;
+        const x1 = farX + (nearX - farX) * p1;
+        ctx.lineWidth = 1 + 3 * p0;
+        ctx.globalAlpha = 0.25 + 0.55 * p0;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  function drawFlagCluster(f) {
+    const t = project(f.z);
+    if (t <= 0.02) return;
+    const y = screenYAt(t) - (H * 0.05) * t;
+    const s = scaleAt(t);
+    const nearHalf = W * 0.46, farHalf = W * 0.05;
+    const roadHalf = farHalf + (nearHalf - farHalf) * t;
+    const x = W / 2 + f.side * (roadHalf + 18 * s);
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, t * 1.6);
+
+    if (f.kind === "lotus") {
+      // small roadside lotus + diya (oil lamp) cluster
+      const by = y + 2 * s;
+      // diya flame glow
+      const glow = ctx.createRadialGradient(x, by - 14 * s, 1, x, by - 14 * s, 16 * s);
+      glow.addColorStop(0, "rgba(255,200,100,0.55)");
+      glow.addColorStop(1, "rgba(255,200,100,0)");
+      ctx.fillStyle = glow;
+      ctx.beginPath(); ctx.arc(x, by - 14 * s, 16 * s, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#ffd35c";
+      ctx.beginPath();
+      ctx.ellipse(x, by - 15 * s, 2.2 * s, 4.5 * s, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = COL.crownDark;
+      ctx.beginPath();
+      ctx.ellipse(x, by - 8 * s, 6 * s, 2.2 * s, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // lotus blooms either side
+      for (const dx of [-16 * s, 16 * s]) {
+        drawLotus(x + dx, by + 2 * s, 7 * s);
+      }
+    } else if (f.kind === "tree") {
+      // roadside pine / leafy tree, grounding the hillside forest
+      const by = y + 2 * s;
+      ctx.fillStyle = "#5a4128";
+      ctx.fillRect(x - 1.6 * s, by - 10 * s, 3.2 * s, 10 * s);
+      const foliage = ctx.createLinearGradient(x, by - 44 * s, x, by - 8 * s);
+      foliage.addColorStop(0, COL.forestFar);
+      foliage.addColorStop(1, COL.forestNear);
+      ctx.fillStyle = foliage;
+      for (let tier = 0; tier < 3; tier++) {
+        const ty = by - 12 * s - tier * 11 * s;
+        const tw = (16 - tier * 3.5) * s;
+        ctx.beginPath();
+        ctx.moveTo(x - tw, ty);
+        ctx.lineTo(x, ty - 15 * s);
+        ctx.lineTo(x + tw, ty);
+        ctx.closePath();
+        ctx.fill();
+      }
+    } else {
+      ctx.strokeStyle = "rgba(60,40,30,0.55)";
+      ctx.lineWidth = Math.max(1, 1.5 * s);
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.quadraticCurveTo(x + 30 * s, y - 10 * s, x + 60 * s, y);
+      ctx.stroke();
+      const colors = [COL.flag1, COL.flag2, COL.flag3];
+      for (let i = 0; i < 5; i++) {
+        const fx = x + i * 15 * s;
+        const fy = y - 8 * s + Math.sin(i) * 3 * s;
+        ctx.fillStyle = colors[i % colors.length];
+        ctx.beginPath();
+        ctx.moveTo(fx, fy);
+        ctx.lineTo(fx + 7 * s, fy);
+        ctx.lineTo(fx + 3.5 * s, fy + 10 * s);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawLotus(x, y, r) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = COL.lotusPink;
+    for (let i = 0; i < 5; i++) {
+      const ang = (Math.PI * 2 * i) / 5 - Math.PI / 2;
+      ctx.save();
+      ctx.rotate(ang);
+      ctx.beginPath();
+      ctx.ellipse(0, -r * 0.55, r * 0.34, r * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.fillStyle = COL.lotusCenter;
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawSnow() {
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    for (const f of snowflakes) {
+      ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function drawPetals() {
+    for (const p of petals) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, p.r, p.r * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // ---------- drawing: perspective entities ----------
+  function drawObstacle(o) {
+    const t = project(o.z);
+    if (t < 0.02) return;
+    const y = screenYAt(t);
+    const s = scaleAt(t);
+    const x = laneScreenX(o.lane, t);
+    const u = scaleUnit() * s;
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, t * 2.2);
+
+    if (o.type === "rock") {
+      ctx.fillStyle = COL.rockDark;
+      const h = u * 1.15, w = u * 1.3;
+      ctx.beginPath();
+      ctx.moveTo(x - w / 2, y);
+      ctx.lineTo(x - w * 0.28, y - h * 0.7);
+      ctx.lineTo(x, y - h);
+      ctx.lineTo(x + w * 0.32, y - h * 0.62);
+      ctx.lineTo(x + w / 2, y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.5)";
+      ctx.beginPath();
+      ctx.moveTo(x, y - h);
+      ctx.lineTo(x + w * 0.14, y - h * 0.45);
+      ctx.lineTo(x - w * 0.08, y - h * 0.4);
+      ctx.closePath();
+      ctx.fill();
+    } else if (o.type === "icicle") {
+      const h = u * 1.3, w = u * 0.75;
+      const hangY = screenYAt(t) - (groundY - horizonY) * t * 0.0 - (H * 0.30) * t;
+      ctx.fillStyle = COL.ice;
+      ctx.beginPath();
+      ctx.moveTo(x - w / 2, hangY);
+      ctx.lineTo(x + w / 2, hangY);
+      ctx.lineTo(x, hangY + h);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+      ctx.lineWidth = Math.max(1, s);
+      ctx.stroke();
+    } else { // boulder — full lane blocker
+      const h = u * 1.9, w = u * 1.55;
+      const grad = ctx.createLinearGradient(x - w / 2, y - h, x + w / 2, y);
+      grad.addColorStop(0, COL.boulder);
+      grad.addColorStop(1, COL.boulderDark);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(x, y - h * 0.5, w / 2, h / 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.lineWidth = Math.max(1, 2 * s);
+      ctx.beginPath();
+      ctx.ellipse(x - w * 0.15, y - h * 0.6, w * 0.18, h * 0.12, -0.4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawCollectible(c) {
+    const t = project(c.z);
+    if (t < 0.02) return;
+    const y = screenYAt(t) - (H * 0.13) * t;
+    const x = laneScreenX(c.lane, t);
+    const r = scaleUnit() * scaleAt(t) * 0.32;
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, t * 2.2);
+    drawModak(x, y, r);
+    ctx.restore();
+  }
+
+  function drawModak(x, y, r) {
+    ctx.save();
+    ctx.translate(x, y);
+    const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.5, r * 0.1, 0, 0, r * 1.5);
+    grad.addColorStop(0, "#f5cf7d");
+    grad.addColorStop(1, COL.modakBody);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(-r, r * 0.4);
+    ctx.quadraticCurveTo(-r * 0.9, -r * 1.2, 0, -r * 1.3);
+    ctx.quadraticCurveTo(r * 0.9, -r * 1.2, r, r * 0.4);
+    ctx.quadraticCurveTo(0, r * 0.9, -r, r * 0.4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.55)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.5, -r * 0.1);
+    ctx.quadraticCurveTo(0, -r * 0.6, r * 0.5, -r * 0.1);
+    ctx.stroke();
+    ctx.fillStyle = COL.modakLeaf;
+    ctx.beginPath();
+    ctx.ellipse(0, -r * 1.3, r * 0.35, r * 0.15, 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawDust() {
+    for (const d of dust) {
+      const a = 1 - d.age / d.life;
+      ctx.fillStyle = `rgba(255,255,255,${0.5 * a})`;
+      ctx.beginPath(); ctx.arc(d.x, d.y, d.r * (0.6 + a * 0.6), 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  function drawSparks() {
+    for (const s of sparks) {
+      const a = 1 - s.age / s.life;
+      ctx.strokeStyle = `rgba(255,210,90,${a})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(s.x - s.vx * 0.04, s.y - s.vy * 0.04);
+      ctx.stroke();
+    }
+  }
+
+  // shadow under player, shrinks with jump height
+  function drawShadow(x, y, u, airFrac) {
+    const shrink = Math.max(0.25, 1 - airFrac);
+    ctx.save();
+    ctx.globalAlpha = 0.35 * shrink;
+    ctx.fillStyle = "#1a1220";
+    ctx.beginPath();
+    ctx.ellipse(x, y, u * 0.9 * shrink, u * 0.28 * shrink, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Ganesha riding Mushak — refined, respectful, cheerful vector sprite
+  function drawGanesha(x, groundBottom, u, ducking, phase, hurt, lean) {
+    ctx.save();
+    ctx.translate(x, groundBottom);
+    ctx.rotate(lean * 0.12);
+
+    const crouch = ducking ? 0.42 : 1;
+    const legSwing = phase === 0 ? 1 : -1;
+    if (hurt) ctx.globalAlpha = 0.55 + 0.35 * Math.sin(Date.now() / 40);
+
+    // tail
+    ctx.strokeStyle = COL.mouseDark;
+    ctx.lineWidth = u * 0.09;
+    ctx.beginPath();
+    ctx.moveTo(-u * 0.85, -u * 0.55);
+    ctx.quadraticCurveTo(-u * 1.35, -u * 0.7, -u * 1.25, -u * 1.05);
+    ctx.stroke();
+
+    // legs
+    ctx.fillStyle = COL.mouseDark;
+    ctx.beginPath();
+    ctx.ellipse(-u * 0.35 + legSwing * u * 0.07, -u * 0.02, u * 0.16, u * 0.22, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(u * 0.35 - legSwing * u * 0.07, -u * 0.02, u * 0.16, u * 0.22, 0, 0, Math.PI * 2); ctx.fill();
+
+    // body with gradient
+    const bodyGrad = ctx.createLinearGradient(-u, -u * 0.9, u, -u * 0.2);
+    bodyGrad.addColorStop(0, COL.mouseBodyLight);
+    bodyGrad.addColorStop(1, COL.mouseBody);
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath();
+    ctx.ellipse(0, -u * 0.55, u * 0.95, u * 0.42, 0, 0, Math.PI * 2); ctx.fill();
+
+    // ears
+    ctx.fillStyle = COL.mouseBody;
+    ctx.beginPath(); ctx.ellipse(u * 0.7, -u * 0.9, u * 0.2, u * 0.2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#c9ab8f";
+    ctx.beginPath(); ctx.ellipse(u * 0.7, -u * 0.9, u * 0.1, u * 0.1, 0, 0, Math.PI * 2); ctx.fill();
+
+    // torso
+    const bodyY = -u * (0.95 + 0.85 * crouch);
+    const clothGrad = ctx.createLinearGradient(-u * 0.5, bodyY, u * 0.5, bodyY + u);
+    clothGrad.addColorStop(0, COL.cloth);
+    clothGrad.addColorStop(1, COL.clothDark);
+    ctx.fillStyle = clothGrad;
+    ctx.beginPath();
+    ctx.ellipse(0, bodyY + u * 0.35 * crouch, u * 0.5, u * 0.55 * crouch, 0, 0, Math.PI * 2); ctx.fill();
+
+    // head
+    const headY = bodyY - u * 0.15 * crouch;
+    const headGrad = ctx.createRadialGradient(-u * 0.15, headY - u * 0.15, u * 0.05, 0, headY, u * 0.55);
+    headGrad.addColorStop(0, COL.ganeshaSkinLight);
+    headGrad.addColorStop(1, COL.ganeshaSkin);
+    ctx.fillStyle = headGrad;
+    ctx.beginPath(); ctx.arc(0, headY, u * 0.5, 0, Math.PI * 2); ctx.fill();
+
+    // ears (elephant)
+    ctx.fillStyle = COL.ganeshaSkinDark;
+    ctx.beginPath(); ctx.ellipse(-u * 0.42, headY - u * 0.05, u * 0.28, u * 0.36, -0.25, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(u * 0.42, headY - u * 0.05, u * 0.28, u * 0.36, 0.25, 0, Math.PI * 2); ctx.fill();
+
+    // crown
+    const crownGrad = ctx.createLinearGradient(0, headY - u * 0.72, 0, headY - u * 0.4);
+    crownGrad.addColorStop(0, COL.crown);
+    crownGrad.addColorStop(1, COL.crownDark);
+    ctx.fillStyle = crownGrad;
+    ctx.beginPath();
+    ctx.moveTo(-u * 0.3, headY - u * 0.42);
+    ctx.lineTo(0, headY - u * 0.72);
+    ctx.lineTo(u * 0.3, headY - u * 0.42);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#fff3c4";
+    ctx.beginPath(); ctx.arc(0, headY - u * 0.72, u * 0.05, 0, Math.PI * 2); ctx.fill();
+
+    // trunk curling toward a modak
+    ctx.strokeStyle = COL.ganeshaSkin;
+    ctx.lineWidth = u * 0.14;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(u * 0.08, headY + u * 0.18);
+    ctx.quadraticCurveTo(u * 0.5, headY + u * 0.35, u * 0.42, headY + u * 0.62);
+    ctx.stroke();
+    drawModak(u * 0.42, headY + u * 0.68, u * 0.18);
+
+    // eye
+    ctx.fillStyle = "#2c2418";
+    ctx.beginPath(); ctx.arc(-u * 0.1, headY - u * 0.04, u * 0.05, 0, Math.PI * 2); ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawPlayer() {
+    const t = 1;
+    const u = scaleUnit();
+    const px = laneScreenX(player.visualLane, t);
+    const bottom = groundY - player.airY;
+
+    drawShadow(px, groundY + 2, u, player.airY / (H * 0.5));
+
+    const hurt = player.invuln > 0;
+    drawGanesha(px, bottom, u, player.ducking, player.runPhase, hurt, player.lean);
+  }
+
+  function draw(t) {
+    ctx.save();
+    if (shakeTime > 0) {
+      const m = shakeMag * (shakeTime / 0.28);
+      ctx.translate((Math.random() - 0.5) * m, (Math.random() - 0.5) * m);
+    }
+    ctx.clearRect(-20, -20, W + 40, H + 40);
+    drawBackground(t);
+
+    if (state === STATE.PLAYING || state === STATE.OVER) {
+      const drawList = [];
+      for (const o of obstacles) drawList.push({ z: o.z, fn: () => drawObstacle(o) });
+      for (const c of collectibles) drawList.push({ z: c.z, fn: () => drawCollectible(c) });
+      drawList.sort((a, b) => b.z - a.z);
+      for (const d of drawList) d.fn();
+    }
+
+    drawDust();
+    drawPlayer();
+    drawSparks();
+    drawSnow();
+    drawPetals();
+    ctx.restore();
+
+    if (hitFlash > 0) {
+      ctx.fillStyle = `rgba(200,30,30,${hitFlash * 0.28})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // vignette
+    const vg = ctx.createRadialGradient(W / 2, H * 0.55, H * 0.35, W / 2, H * 0.55, H * 0.85);
+    vg.addColorStop(0, "rgba(0,0,0,0)");
+    vg.addColorStop(1, "rgba(10,4,16,0.38)");
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ---------- main loop ----------
+  let lastT = 0;
+  function loop(now) {
+    if (!lastT) lastT = now;
+    let dt = (now - lastT) / 1000;
+    dt = Math.min(dt, 0.033);
+    lastT = now;
+
+    update(dt);
+    draw(now / 1000);
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
